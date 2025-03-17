@@ -75,6 +75,7 @@ void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef* hi2c) {
 }
 
 // Called when detecting TRB address match on I2C bus
+// Will temporarily wake up the CPU during sleep mode
 void HAL_I2C_AddrCallback(I2C_HandleTypeDef* hi2c, uint8_t TransferDirection, uint16_t AddrMatchCode) {
 	if (TransferDirection == I2C_DIRECTION_TRANSMIT) {
 		// First byte is always the register address
@@ -100,6 +101,14 @@ void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef* hi2c) {
 		for (uint8_t i = 0; i < NET_XFER_SIZE; ++i) {
 			mem[reg_addr] += rx_buffer[i] << 8*i;
 		}
+		// If the received packet is WAKEUP command, disable SleepOnExit to stay in RUN mode
+		if (reg_addr == TRB_WAKE_UP && mem[reg_addr] == NET_CMD_ON && !woken_up) {
+			HAL_ResumeTick();
+			HAL_PWR_DisableSleepOnExit();
+			woken_up = 1;
+			mem[TRB_IS_WOKEN_UP] = NET_CMD_ON;
+		}
+		reg_addr = 0x00;
 	}
 }
 
@@ -116,29 +125,20 @@ static void blink_led(const uint32_t delta_ms) {
 		led_off_ms += delta_ms;
 	}
 
-	if (woken_up) {
-		if (mem[TRB_CLEAR_TO_TRIGGER] == NET_CMD_ON) {
-			if (led_on_ms > 50) {
-				HAL_GPIO_WritePin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin, GPIO_PIN_RESET);
-				led_on_ms = 0;
-			}else if (led_off_ms > (first_pulse ? 50 : 1000)) {
-				HAL_GPIO_WritePin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin, GPIO_PIN_SET);
-				led_off_ms = 0;
-				first_pulse = !first_pulse;
-			}
-		}
+	if (mem[TRB_CLEAR_TO_TRIGGER] == NET_CMD_ON) {
 		if (led_on_ms > 50) {
 			HAL_GPIO_WritePin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin, GPIO_PIN_RESET);
 			led_on_ms = 0;
-		}else if (led_off_ms > 1000) {
+		}else if (led_off_ms > (first_pulse ? 50 : 1000)) {
 			HAL_GPIO_WritePin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin, GPIO_PIN_SET);
 			led_off_ms = 0;
+			first_pulse = !first_pulse;
 		}
 	}else {
 		if (led_on_ms > 50) {
 			HAL_GPIO_WritePin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin, GPIO_PIN_RESET);
 			led_on_ms = 0;
-		}else if (led_off_ms > 5000) {
+		}else if (led_off_ms > 1000) {
 			HAL_GPIO_WritePin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin, GPIO_PIN_SET);
 			led_off_ms = 0;
 		}
@@ -212,34 +212,30 @@ int main(void)
 	MX_I2C1_Init();
 	MX_USB_PCD_Init();
 	/* USER CODE BEGIN 2 */
-	HAL_I2C_IsDeviceReady(&hi2c1, NET_ADDR_TRB << 1, 10, 5000);
+	// Enable I2C address callback and independent processing of R/W
 	HAL_I2C_EnableListen_IT(&hi2c1);
 	HAL_GPIO_WritePin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin, GPIO_PIN_RESET);
 
-	// TODO: go in standby mode
-
-	uint32_t now_ms = HAL_GetTick();
-	uint32_t old_ms = 0;
-	uint32_t delta_ms = 0;
+	// Enter SLEEP mode. SleepOnExit keeps the MCU in SLEEP only to process interrupts (I2C, etc)
+	// Wake up to RUN mode is done when the command WAKE_UP from Master is received.
+	HAL_SuspendTick();
+	HAL_PWR_EnableSleepOnExit();
+	HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
 	/* USER CODE END 2 */
 
 	/* Infinite loop */
 	/* USER CODE BEGIN WHILE */
 	while (1)
 	{
+		static uint32_t now_ms = HAL_GetTick();
+		static uint32_t old_ms = 0;
+		static uint32_t delta_ms = 0;
+
 		old_ms = now_ms;
 		now_ms = HAL_GetTick();
 		delta_ms = now - old;
 
-		if (!woken_up) {
-			if (mem[TRB_WAKE_UP] == NET_CMD_ON) {
-				// TODO: go in run mode
-				woken_up = 1;
-				mem[TRB_IS_WOKEN_UP] = NET_CMD_ON;
-			}
-		}
-
-		if (woken_up && mem[TRB_CLEAR_TO_TRIGGER] == NET_CMD_ON) {
+		if (mem[TRB_CLEAR_TO_TRIGGER] == NET_CMD_ON) {
 			listen_pyros(delta_ms);
 		}
 
