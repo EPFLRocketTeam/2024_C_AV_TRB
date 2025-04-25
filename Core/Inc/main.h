@@ -67,7 +67,7 @@ void Error_Handler(void);
 #define LED_STATUS_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
-
+#define VCP_ENABLE 1
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

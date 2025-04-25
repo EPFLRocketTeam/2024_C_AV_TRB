@@ -38,8 +38,7 @@
 /* USER CODE BEGIN PD */
 #define SLEEP_MODE_EN	0
 
-#define VCP_SERIAL_EN	1
-#if (VCP_SERIAL_EN)
+#if (VCP_ENABLE)
 #define VCP_SERIAL_DB	1
 #endif
 
@@ -279,7 +278,7 @@ int main(void)
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
 	// Initialize VCP (Virtual COM Port) for serial communication over USB
-#if (VCP_SERIAL_EN)
+#if (VCP_ENABLE)
 	vcp_init();
 #endif
 
