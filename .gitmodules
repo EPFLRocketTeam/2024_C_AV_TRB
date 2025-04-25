@@ -1,3 +1,6 @@
 [submodule "2024_C_AV_INTRANET"]
 	path = 2024_C_AV_INTRANET
 	url = .\\2024_C_AV_INTRANET\\
+[submodule "VCP"]
+	path = VCP
+	url = .\\VCP\\
