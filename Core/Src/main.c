@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "intranet_commands.h"
 #include "usbd_cdc_if.h"
+#include "serial_print.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -54,16 +55,13 @@
 I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
-// I2C register and variables
+// I2C registers and variables
 static uint32_t mem[TRB_NB_REG];
 static uint8_t reg_addr = 0x00;
 static uint8_t reg_addr_rcvd = 0;
 static uint8_t rx_bytes_count = 0;
 static uint8_t tx_bytes_count = 0;
 static uint8_t rx_buffer[NET_XFER_SIZE];
-
-// Serial USB buffer
-static uint8_t serial_buffer[APP_TX_DATA_SIZE];
 
 static uint8_t woken_up = 0;
 static uint8_t triggered = 0;
@@ -89,9 +87,18 @@ void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef* hi2c) {
 // Will temporarily wake up the CPU during sleep mode
 void HAL_I2C_AddrCallback(I2C_HandleTypeDef* hi2c, uint8_t TransferDirection, uint16_t AddrMatchCode) {
 	if (TransferDirection == I2C_DIRECTION_TRANSMIT) {
+#if (VCP_SERIAL_DB)
+		serial_println("===New I2C request===");
+		serial_print("Register: 0x");
+		serial_println_n(reg_addr, 16);
+#endif
 		HAL_I2C_Slave_Seq_Receive_IT(hi2c, &reg_addr, 1, I2C_FIRST_FRAME);
 	}else {
 		// Transmit data from requested register
+#if (VCP_SERIAL_DB)
+		serial_print("Transmitting data: ");
+		serial_println_n(mem[reg_addr], 10);
+#endif
 		uint8_t tx_byte = mem[reg_addr] & 0xFF;
 		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, (uint8_t*) &tx_byte, 1, I2C_FIRST_FRAME);
 	}
@@ -123,6 +130,9 @@ void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef* hi2c) {
 void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef* hi2c) {
 	++tx_bytes_count;
 	if (tx_bytes_count >= NET_XFER_SIZE) {
+#if (VCP_SERIAL_DB)
+		serial_println("Transmission done.");
+#endif
 		tx_bytes_count = 0;
 		return;
 	}
@@ -159,12 +169,21 @@ void process_rx_data(void) {
 	for (uint8_t i = 0; i < NET_XFER_SIZE; ++i) {
 		mem[reg_addr] += rx_buffer[i] << 8*i;
 	}
+
+#if (VCP_SERIAL_DB)
+	serial_print("Received data: ");
+	serial_println_n(mem[reg_addr], 10);
+#endif
+
 	// If the received packet is WAKEUP command, disable SleepOnExit to stay in RUN mode
 	if (reg_addr == TRB_WAKE_UP && mem[reg_addr] == NET_CMD_ON && !woken_up) {
 		HAL_ResumeTick();
 		HAL_PWR_DisableSleepOnExit();
 		woken_up = 1;
 		mem[TRB_IS_WOKEN_UP] = NET_CMD_ON;
+#if (VCP_SERIAL_DB)
+		serial_println("Received WAKE_UP command. SLEEP mode disabled, entered RUN mode.");
+#endif
 	}
 }
 
@@ -304,6 +323,7 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+	char echo_buffer[APP_RX_DATA_SIZE];
 	uint32_t now_ms = HAL_GetTick();
 	while (1)
 	{
@@ -321,9 +341,9 @@ int main(void)
 		blink_led(delta_ms);
 
 		// Echo data received on VCP back to the host
-		int len = vcp_recv(serial_buffer, APP_RX_DATA_SIZE);
+		int len = vcp_recv(echo_buffer, APP_RX_DATA_SIZE);
 		if (len > 0) {
-			vcp_send(serial_buffer, len);
+			vcp_send(echo_buffer, len);
 		}
 
 		HAL_Delay(10);
