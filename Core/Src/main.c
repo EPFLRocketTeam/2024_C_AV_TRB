@@ -26,6 +26,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "intranet_commands.h"
+#include "usbd_cdc_if.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -35,6 +36,13 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define SLEEP_MODE_EN	0
+
+#define VCP_SERIAL_EN	1
+#if (VCP_SERIAL_EN)
+#define VCP_SERIAL_DB	1
+#endif
+
 #define PYRO_ON_MIN_FOR_TRIGGER 250
 /* USER CODE END PD */
 
@@ -47,13 +55,16 @@
 I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
+// I2C register and variables
 static uint32_t mem[TRB_NB_REG];
 static uint8_t reg_addr = 0x00;
 static uint8_t reg_addr_rcvd = 0;
 static uint8_t rx_bytes_count = 0;
 static uint8_t tx_bytes_count = 0;
 static uint8_t rx_buffer[NET_XFER_SIZE];
-static uint8_t tx_buffer[NET_XFER_SIZE];
+
+// Serial USB buffer
+static uint8_t serial_buffer[APP_TX_DATA_SIZE];
 
 static uint8_t woken_up = 0;
 static uint8_t triggered = 0;
@@ -164,7 +175,7 @@ static void blink_led(const uint32_t delta_ms) {
 	static uint32_t led_on_ms = 0;
 	static uint32_t led_off_ms = 0;
 
-	is_led_on = HAL_GPIO_ReadPin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin) == GPIO_PIN_SET;
+	is_led_on = HAL_GPIO_ReadPin(LED_STATUS_GPIO_Port, LED_STATUS_Pin) == GPIO_PIN_SET;
 	if (is_led_on) {
 		led_on_ms += delta_ms;
 	}else {
@@ -173,19 +184,19 @@ static void blink_led(const uint32_t delta_ms) {
 
 	if (mem[TRB_CLEAR_TO_TRIGGER] == NET_CMD_ON) {
 		if (led_on_ms > 50) {
-			HAL_GPIO_WritePin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin, GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_RESET);
 			led_on_ms = 0;
 		}else if (led_off_ms > (first_pulse ? 50 : 850)) {
-			HAL_GPIO_WritePin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin, GPIO_PIN_SET);
+			HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_SET);
 			led_off_ms = 0;
 			first_pulse = !first_pulse;
 		}
 	}else {
 		if (led_on_ms > 50) {
-			HAL_GPIO_WritePin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin, GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_RESET);
 			led_on_ms = 0;
 		}else if (led_off_ms > 950) {
-			HAL_GPIO_WritePin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin, GPIO_PIN_SET);
+			HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_SET);
 			led_off_ms = 0;
 		}
 	}
@@ -267,21 +278,29 @@ int main(void)
   MX_I2C1_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
+	// Initialize VCP (Virtual COM Port) for serial communication over USB
+#if (VCP_SERIAL_EN)
+	vcp_init();
+#endif
+
 	// Enable I2C address callback and independent processing of R/W
 	if (HAL_I2C_EnableListen_IT(&hi2c1) != HAL_OK) {
 		Error_Handler();
 	}
+
 	// Reset all GPIOs
-	HAL_GPIO_WritePin(LED_ACTIVE_GPIO_Port, LED_ACTIVE_Pin, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_RESET);
 	HAL_GPIO_WritePin(PYRO1_GPIO_Port, PYRO1_Pin, GPIO_PIN_RESET);
 	HAL_GPIO_WritePin(PYRO2_GPIO_Port, PYRO2_Pin, GPIO_PIN_RESET);
 	HAL_GPIO_WritePin(PYRO3_GPIO_Port, PYRO3_Pin, GPIO_PIN_RESET);
 
 	// Enter SLEEP mode. SleepOnExit keeps the MCU in SLEEP only to process interrupts (I2C, etc)
 	// Wake up to RUN mode is done when the command WAKE_UP from Master is received.
-//	HAL_SuspendTick();
-//	HAL_PWR_EnableSleepOnExit();
-//	HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+#if (SLEEP_MODE_EN)
+	HAL_SuspendTick();
+	HAL_PWR_EnableSleepOnExit();
+	HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -301,6 +320,12 @@ int main(void)
 		}
 
 		blink_led(delta_ms);
+
+		// Echo data received on VCP back to the host
+		int len = vcp_recv(serial_buffer, APP_RX_DATA_SIZE);
+		if (len > 0) {
+			vcp_send(serial_buffer, len);
+		}
 
 		HAL_Delay(10);
     /* USER CODE END WHILE */
@@ -420,7 +445,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, PYRO1_Pin|PYRO2_Pin|PYRO3_Pin|LED_ACTIVE_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, PYRO1_Pin|PYRO2_Pin|PYRO3_Pin|LED_STATUS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : PYRO1_Pin PYRO2_Pin PYRO3_Pin */
   GPIO_InitStruct.Pin = PYRO1_Pin|PYRO2_Pin|PYRO3_Pin;
@@ -429,12 +454,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : LED_ACTIVE_Pin */
-  GPIO_InitStruct.Pin = LED_ACTIVE_Pin;
+  /*Configure GPIO pin : LED_STATUS_Pin */
+  GPIO_InitStruct.Pin = LED_STATUS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LED_ACTIVE_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(LED_STATUS_GPIO_Port, &GPIO_InitStruct);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */

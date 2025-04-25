@@ -63,8 +63,8 @@ void Error_Handler(void);
 #define PYRO2_GPIO_Port GPIOA
 #define PYRO3_Pin GPIO_PIN_2
 #define PYRO3_GPIO_Port GPIOA
-#define LED_ACTIVE_Pin GPIO_PIN_9
-#define LED_ACTIVE_GPIO_Port GPIOA
+#define LED_STATUS_Pin GPIO_PIN_9
+#define LED_STATUS_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
 
