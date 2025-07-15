@@ -21,13 +21,14 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "usb_device.h"
+#include <limits.h>
+
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "intranet_commands.h"
-#include "usbd_cdc_if.h"
-#include "serial_print.h"
+//#include "usbd_cdc_if.h"
+//#include "serial_print.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,10 +38,11 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define SLEEP_MODE_EN	0
+#define SLEEP_MODE_EN	1
+#define PYRO_TESTING_EN	0
 
 #if (VCP_ENABLE)
-#define VCP_SERIAL_DB	1
+#define VCP_SERIAL_DB	0
 #endif
 
 #define PYRO_ON_MIN_FOR_TRIGGER 250
@@ -62,6 +64,7 @@ static uint8_t reg_addr_rcvd = 0;
 static uint8_t rx_bytes_count = 0;
 static uint8_t tx_bytes_count = 0;
 static uint8_t rx_buffer[NET_XFER_SIZE];
+static uint8_t tx_buffer[NET_XFER_SIZE];
 
 static uint8_t woken_up = 0;
 static uint8_t triggered = 0;
@@ -80,12 +83,14 @@ void process_rx_data(void);
 
 void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef* hi2c) {
 	reg_addr_rcvd = 0;
+	rx_bytes_count = 0;
 	HAL_I2C_EnableListen_IT(hi2c);
 }
 
 // Called when detecting TRB address match on I2C bus
 // Will temporarily wake up the CPU during sleep mode
 void HAL_I2C_AddrCallback(I2C_HandleTypeDef* hi2c, uint8_t TransferDirection, uint16_t AddrMatchCode) {
+	rx_bytes_count = 0;
 	if (TransferDirection == I2C_DIRECTION_TRANSMIT) {
 #if (VCP_SERIAL_DB)
 		serial_println("===New I2C request===");
@@ -99,8 +104,10 @@ void HAL_I2C_AddrCallback(I2C_HandleTypeDef* hi2c, uint8_t TransferDirection, ui
 		serial_print("Transmitting data: ");
 		serial_println_n(mem[reg_addr], 10);
 #endif
-		uint8_t tx_byte = mem[reg_addr] & 0xFF;
-		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, (uint8_t*) &tx_byte, 1, I2C_FIRST_FRAME);
+//		uint8_t tx_byte = mem[reg_addr] & 0xFF;
+//		tx_buffer[0] = tx_byte;
+//		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, (uint8_t*) &tx_byte, 1, I2C_FIRST_FRAME);
+		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, (uint8_t*)&mem[reg_addr], NET_XFER_SIZE, I2C_FIRST_AND_LAST_FRAME);
 	}
 }
 
@@ -128,26 +135,29 @@ void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef* hi2c) {
 }
 
 void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef* hi2c) {
-	++tx_bytes_count;
-	if (tx_bytes_count >= NET_XFER_SIZE) {
-#if (VCP_SERIAL_DB)
-		serial_println("Transmission done.");
-#endif
-		tx_bytes_count = 0;
-		return;
-	}
-
-	if (tx_bytes_count < NET_XFER_SIZE - 1) {
-		uint8_t tx_byte = (mem[reg_addr] >> tx_bytes_count * 8) & 0xFF;
-		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, (uint8_t*) &tx_byte, 1, I2C_NEXT_FRAME);
-	}else {
-		uint8_t tx_byte = (mem[reg_addr] >> tx_bytes_count * 8) & 0xFF;
-		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, (uint8_t*) &tx_byte, 1, I2C_LAST_FRAME);
-	}
+//	++tx_bytes_count;
+//	if (tx_bytes_count >= NET_XFER_SIZE) {
+//#if (VCP_SERIAL_DB)
+//		serial_println("Transmission done.");
+//#endif
+//		tx_bytes_count = 0;
+//		return;
+//	}
+//
+//	if (tx_bytes_count < NET_XFER_SIZE - 1) {
+//		uint8_t tx_byte = (mem[reg_addr] >> (tx_bytes_count * 8)) & 0xFF;
+//		tx_buffer[tx_bytes_count] = tx_byte;
+//		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &tx_buffer[tx_bytes_count], 1, I2C_NEXT_FRAME);
+//	}else {
+//		uint8_t tx_byte = (mem[reg_addr] >> (tx_bytes_count * 8)) & 0xFF;
+//		tx_buffer[tx_bytes_count] = tx_byte;
+//		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &tx_buffer[tx_bytes_count], 1, I2C_LAST_FRAME);
+//	}
 }
 
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef* hi2c) {
 	reg_addr= 0;
+	rx_bytes_count = 0;
 	reg_addr_rcvd = 0;
 
 	uint32_t code = HAL_I2C_GetError(hi2c);
@@ -157,6 +167,7 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef* hi2c) {
 	}
 
 	if (code == HAL_I2C_ERROR_BERR) {
+		HAL_GPIO_WritePin(PYRO2_GPIO_Port, PYRO2_Pin, 1);
 		HAL_I2C_DeInit(hi2c);
 		HAL_I2C_Init(hi2c);
 	}
@@ -167,7 +178,7 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef* hi2c) {
 void process_rx_data(void) {
 	mem[reg_addr] = 0;
 	for (uint8_t i = 0; i < NET_XFER_SIZE; ++i) {
-		mem[reg_addr] += rx_buffer[i] << 8*i;
+		mem[reg_addr] += rx_buffer[i] << (8*i);
 	}
 
 #if (VCP_SERIAL_DB)
@@ -263,6 +274,99 @@ static void listen_pyros(uint32_t delta_ms) {
 	}
 }
 
+#if (PYRO_TESTING_EN)
+typedef enum {
+	PYRO1_ONLY,
+	PYRO2_ONLY,
+	PYRO3_ONLY,
+	PYRO12_SIMULTANEOUS,
+	PYRO13_SIMULTANEOUS,
+	PYRO23_SIMULTANEOUS,
+	ALL_SIMULTANEOUS,
+	ALL_DELAYED
+} pyro_testing_mode_t;
+
+void pyro_test(pyro_testing_mode_t mode, uint32_t elapsed_ms) {
+	static uint8_t fired_pyro1 = 0;
+	static uint8_t fired_pyro2 = 0;
+	static uint8_t fired_pyro3 = 0;
+	const uint32_t delay = 20e3;
+	// Pyro test, 15s delay after power on
+
+	switch (mode) {
+	case PYRO1_ONLY:
+//		if (elapsed_ms >= delay && !triggered) {
+//			mem[TRB_PYROS] = NET_CMD_ON;
+//		}else {
+//			mem[TRB_PYROS] = NET_CMD_OFF;
+//		}
+		break;
+	case PYRO2_ONLY:
+		if (elapsed_ms >= delay && !triggered) {
+			mem[TRB_PYROS] = NET_CMD_ON << 8;
+		}else {
+			mem[TRB_PYROS] = NET_CMD_OFF << 8;
+		}
+		break;
+	case PYRO3_ONLY:
+		if (elapsed_ms >= delay && !triggered) {
+			mem[TRB_PYROS] = NET_CMD_ON << 16;
+		}else {
+			mem[TRB_PYROS] = NET_CMD_OFF << 16;
+		}
+		break;
+	case PYRO12_SIMULTANEOUS:
+//		if (elapsed_ms >= delay && !triggered) {
+//			mem[TRB_PYROS] = NET_CMD_ON | (NET_CMD_ON << 8);
+//		}
+//		if (elapsed_ms >= delay + PYRO_ON_MIN_FOR_TRIGGER) {
+//			mem[TRB_PYROS] = NET_CMD_OFF | (NET_CMD_OFF << 8);
+//		}
+		break;
+	case PYRO13_SIMULTANEOUS:
+//		if (elapsed_ms >= delay && !triggered) {
+//			mem[TRB_PYROS] = NET_CMD_ON | (NET_CMD_ON << 16);
+//		}
+//		if (elapsed_ms >= delay + PYRO_ON_MIN_FOR_TRIGGER) {
+//			mem[TRB_PYROS] = NET_CMD_OFF | (NET_CMD_OFF << 16);
+//		}
+		break;
+	case PYRO23_SIMULTANEOUS:
+		if (elapsed_ms >= delay && !triggered) {
+			mem[TRB_PYROS] = (NET_CMD_ON << 8) | (NET_CMD_ON << 16);
+			}
+		if (elapsed_ms >= delay + PYRO_ON_MIN_FOR_TRIGGER) {
+			mem[TRB_PYROS] = (NET_CMD_OFF << 8) | (NET_CMD_OFF << 16);
+		}
+		break;
+	case ALL_SIMULTANEOUS:
+//		if (elapsed_ms >= delay && !triggered) {
+//			mem[TRB_PYROS] = NET_CMD_ON | (NET_CMD_ON << 8) | (NET_CMD_ON << 16);
+//		}
+//		if (elapsed_ms >= delay + PYRO_ON_MIN_FOR_TRIGGER) {
+//			mem[TRB_PYROS] = NET_CMD_OFF | (NET_CMD_OFF << 8) | (NET_CMD_OFF << 16);
+//		}
+		break;
+	case ALL_DELAYED:
+//		if (now_ms >= delay && !fired_pyro1) {
+//			mem[TRB_PYROS] = NET_CMD_ON;
+//		}
+//		if (elapsed_ms >= delay + PYRO_ON_MIN_FOR_TRIGGER && !fired_pyro2) {
+//			mem[TRB_PYROS] = NET_CMD_OFF | (NET_CMD_ON << 8);
+//			fired_pyro1 = 1;
+//		}
+//		if (elapsed_ms >= delay + PYRO_ON_MIN_FOR_TRIGGER * 2 && !fired_pyro3) {
+//			mem[TRB_PYROS] = (NET_CMD_OFF << 8) | (NET_CMD_ON << 16);
+//			fired_pyro2 = 1;
+//		}
+//		if (elapsed_ms >= delay + PYRO_ON_MIN_FOR_TRIGGER * 3) {
+//			mem[TRB_PYROS] = NET_CMD_OFF | (NET_CMD_OFF << 8) | (NET_CMD_OFF << 16);
+//		}
+		break;
+	}
+}
+#endif /* PYRO_TESTING_EN */
+
 /* USER CODE END 0 */
 
 /**
@@ -294,7 +398,6 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_I2C1_Init();
-  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
 	// Initialize VCP (Virtual COM Port) for serial communication over USB
 #if (VCP_ENABLE)
@@ -323,7 +426,14 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+#if (VCP_ENABLE)
 	char echo_buffer[APP_RX_DATA_SIZE];
+#endif
+	mem[TRB_IS_WOKEN_UP] = NET_CMD_ON;
+	woken_up = 1;
+#if (PYRO_TESTING_EN)
+	mem[TRB_CLEAR_TO_TRIGGER] = NET_CMD_ON;
+#endif
 	uint32_t now_ms = HAL_GetTick();
 	while (1)
 	{
@@ -334,6 +444,10 @@ int main(void)
 		now_ms = HAL_GetTick();
 		delta_ms = now_ms - old_ms;
 
+#if (PYRO_TESTING_EN)
+		pyro_test(PYRO23_SIMULTANEOUS, now_ms);
+#endif
+
 		if (mem[TRB_CLEAR_TO_TRIGGER] == NET_CMD_ON) {
 			listen_pyros(delta_ms);
 		}
@@ -341,10 +455,12 @@ int main(void)
 		blink_led(delta_ms);
 
 		// Echo data received on VCP back to the host
+#if (VCP_ENABLE)
 		int len = vcp_recv(echo_buffer, APP_RX_DATA_SIZE);
 		if (len > 0) {
 			vcp_send(echo_buffer, len);
 		}
+#endif
 
 		HAL_Delay(10);
     /* USER CODE END WHILE */
@@ -373,12 +489,9 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.MSIState = RCC_MSI_ON;
-  RCC_OscInitStruct.MSICalibrationValue = 0;
-  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
