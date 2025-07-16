@@ -21,12 +21,11 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include <limits.h>
-
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "intranet_commands.h"
+#include "string.h"
 //#include "usbd_cdc_if.h"
 //#include "serial_print.h"
 /* USER CODE END Includes */
@@ -60,14 +59,13 @@ I2C_HandleTypeDef hi2c1;
 // I2C registers and variables
 static uint32_t mem[TRB_NB_REG];
 static uint8_t reg_addr = 0x00;
-static uint8_t reg_addr_rcvd = 0;
 static uint8_t rx_bytes_count = 0;
-static uint8_t tx_bytes_count = 0;
 static uint8_t rx_buffer[NET_XFER_SIZE];
-static uint8_t tx_buffer[NET_XFER_SIZE];
+static uint8_t tx_buffer[NET_XFER_SIZE + 1];
 
 static uint8_t woken_up = 0;
 static uint8_t triggered = 0;
+static uint32_t tx_count = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -82,7 +80,6 @@ void process_rx_data(void);
 /* USER CODE BEGIN 0 */
 
 void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef* hi2c) {
-	reg_addr_rcvd = 0;
 	rx_bytes_count = 0;
 	HAL_I2C_EnableListen_IT(hi2c);
 }
@@ -104,10 +101,11 @@ void HAL_I2C_AddrCallback(I2C_HandleTypeDef* hi2c, uint8_t TransferDirection, ui
 		serial_print("Transmitting data: ");
 		serial_println_n(mem[reg_addr], 10);
 #endif
-//		uint8_t tx_byte = mem[reg_addr] & 0xFF;
-//		tx_buffer[0] = tx_byte;
-//		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, (uint8_t*) &tx_byte, 1, I2C_FIRST_FRAME);
-		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, (uint8_t*)&mem[reg_addr], NET_XFER_SIZE, I2C_FIRST_AND_LAST_FRAME);
+		// WORKAROUND FOR BUG WHEN TX FAILS IF 1ST DATA BYTE MSB IS SET (VALS BW 128-255, ETC.)
+		// Sending a 5th dummy byte first acts as a "damper", solves the problem.
+		memcpy(&tx_buffer[1], &mem[reg_addr], NET_XFER_SIZE);
+		tx_buffer[0] = 0;
+		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, tx_buffer, NET_XFER_SIZE + 1, I2C_LAST_FRAME);
 	}
 }
 
@@ -117,57 +115,32 @@ void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef* hi2c) {
 	// If received 4 bytes of data, store it in memory and exit callback
 	if (rx_bytes_count >= NET_XFER_SIZE) {
 		process_rx_data();
-		reg_addr = 0;
 		rx_bytes_count = 0;
 		return;
 	}
 
 	// Prevent writing to read-only registers
 	if (reg_addr != TRB_IS_WOKEN_UP && reg_addr != TRB_HAS_TRIGGERED) {
-		if (rx_bytes_count < NET_XFER_SIZE - 1) {
-			HAL_I2C_Slave_Seq_Receive_IT(hi2c, &rx_buffer[rx_bytes_count], 1, I2C_NEXT_FRAME);
-			++rx_bytes_count;
-		}else {
-			HAL_I2C_Slave_Seq_Receive_IT(hi2c, &rx_buffer[rx_bytes_count], 1, I2C_LAST_FRAME);
-			++rx_bytes_count;
-		}
+		HAL_I2C_Slave_Seq_Receive_IT(hi2c, (uint8_t*)&rx_buffer, NET_XFER_SIZE, I2C_LAST_FRAME);
+		rx_bytes_count = NET_XFER_SIZE;
 	}
 }
 
 void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef* hi2c) {
-//	++tx_bytes_count;
-//	if (tx_bytes_count >= NET_XFER_SIZE) {
-//#if (VCP_SERIAL_DB)
-//		serial_println("Transmission done.");
-//#endif
-//		tx_bytes_count = 0;
-//		return;
-//	}
-//
-//	if (tx_bytes_count < NET_XFER_SIZE - 1) {
-//		uint8_t tx_byte = (mem[reg_addr] >> (tx_bytes_count * 8)) & 0xFF;
-//		tx_buffer[tx_bytes_count] = tx_byte;
-//		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &tx_buffer[tx_bytes_count], 1, I2C_NEXT_FRAME);
-//	}else {
-//		uint8_t tx_byte = (mem[reg_addr] >> (tx_bytes_count * 8)) & 0xFF;
-//		tx_buffer[tx_bytes_count] = tx_byte;
-//		HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &tx_buffer[tx_bytes_count], 1, I2C_LAST_FRAME);
-//	}
+	++tx_count;
 }
 
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef* hi2c) {
-	reg_addr= 0;
 	rx_bytes_count = 0;
-	reg_addr_rcvd = 0;
 
 	uint32_t code = HAL_I2C_GetError(hi2c);
 
 	if (code == HAL_I2C_ERROR_AF) {
 		__HAL_I2C_CLEAR_FLAG(hi2c, I2C_FLAG_AF);
+		HAL_GPIO_WritePin(PYRO2_GPIO_Port, PYRO2_Pin, 1);
 	}
 
 	if (code == HAL_I2C_ERROR_BERR) {
-		HAL_GPIO_WritePin(PYRO2_GPIO_Port, PYRO2_Pin, 1);
 		HAL_I2C_DeInit(hi2c);
 		HAL_I2C_Init(hi2c);
 	}
@@ -535,7 +508,7 @@ static void MX_I2C1_Init(void)
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
   hi2c1.Init.OwnAddress2 = 0;
   hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_ENABLE;
   hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
   if (HAL_I2C_Init(&hi2c1) != HAL_OK)
   {
