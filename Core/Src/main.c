@@ -79,6 +79,14 @@ void process_rx_data(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+// Enter SLEEP mode. SleepOnExit keeps the MCU in SLEEP only to process interrupts (I2C, etc)
+// Wake up to RUN mode is done when the command WAKE_UP from Master is received.
+void enter_sleep_mode(void) {
+	HAL_SuspendTick();
+	HAL_PWR_EnableSleepOnExit();
+	HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+}
+
 void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef* hi2c) {
 	rx_bytes_count = 0;
 	HAL_I2C_EnableListen_IT(hi2c);
@@ -137,7 +145,6 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef* hi2c) {
 
 	if (code == HAL_I2C_ERROR_AF) {
 		__HAL_I2C_CLEAR_FLAG(hi2c, I2C_FLAG_AF);
-		HAL_GPIO_WritePin(PYRO2_GPIO_Port, PYRO2_Pin, 1);
 	}
 
 	if (code == HAL_I2C_ERROR_BERR) {
@@ -184,7 +191,7 @@ static void blink_led(const uint32_t delta_ms) {
 		led_off_ms += delta_ms;
 	}
 
-	if (mem[TRB_CLEAR_TO_TRIGGER] == NET_CMD_ON) {
+	if (mem[TRB_HAS_TRIGGERED] == NET_CMD_ON) {
 		if (led_on_ms > 50) {
 			HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_RESET);
 			led_on_ms = 0;
@@ -192,6 +199,14 @@ static void blink_led(const uint32_t delta_ms) {
 			HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_SET);
 			led_off_ms = 0;
 			first_pulse = !first_pulse;
+		}
+	}else if (mem[TRB_CLEAR_TO_TRIGGER] == NET_CMD_ON) {
+		if (led_on_ms > 50) {
+			HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_RESET);
+			led_on_ms = 0;
+		}else if (led_off_ms > 450) {
+			HAL_GPIO_WritePin(LED_STATUS_GPIO_Port, LED_STATUS_Pin, GPIO_PIN_SET);
+			led_off_ms = 0;
 		}
 	}else {
 		if (led_on_ms > 50) {
@@ -391,9 +406,7 @@ int main(void)
 	// Enter SLEEP mode. SleepOnExit keeps the MCU in SLEEP only to process interrupts (I2C, etc)
 	// Wake up to RUN mode is done when the command WAKE_UP from Master is received.
 #if (SLEEP_MODE_EN)
-	HAL_SuspendTick();
-	HAL_PWR_EnableSleepOnExit();
-	HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+	enter_sleep_mode();
 #endif
   /* USER CODE END 2 */
 
@@ -426,6 +439,14 @@ int main(void)
 		}
 
 		blink_led(delta_ms);
+
+		// If the received packet is WAKEUP with value NET_CMD_OFF, (re)-enter SLEEP mode
+		if (reg_addr == TRB_WAKE_UP && mem[reg_addr] == NET_CMD_OFF && woken_up) {
+			woken_up = 0;
+			mem[TRB_IS_WOKEN_UP] = NET_CMD_OFF;
+			HAL_I2C_ListenCpltCallback(&hi2c1);
+			enter_sleep_mode();
+		}
 
 		// Echo data received on VCP back to the host
 #if (VCP_ENABLE)
@@ -462,10 +483,17 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.MSIState = RCC_MSI_ON;
+  RCC_OscInitStruct.MSICalibrationValue = 0;
+  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
+  RCC_OscInitStruct.PLL.PLLM = 1;
+  RCC_OscInitStruct.PLL.PLLN = 40;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV7;
+  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
+  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV4;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -475,12 +503,12 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -502,14 +530,14 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x00503D58;
+  hi2c1.Init.Timing = 0x00D09BE3;
   hi2c1.Init.OwnAddress1 = 20;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
   hi2c1.Init.OwnAddress2 = 0;
   hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
   hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_ENABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_ENABLE;
   if (HAL_I2C_Init(&hi2c1) != HAL_OK)
   {
     Error_Handler();
